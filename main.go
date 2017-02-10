@@ -6,6 +6,8 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"runtime"
+	"time"
 
 	"github.com/akmistry/go-nbd/client"
 	"github.com/tecbot/gorocksdb"
@@ -13,11 +15,13 @@ import (
 
 type RocksBlockDevice struct {
 	db   *gorocksdb.DB
+	l    *client.Limiter
 	size uint64
 }
 
 const (
-	blockSize = 512
+	blockSize = 4096
+	diskSize  = 64 * 1024 * 1024 * 1024
 )
 
 var (
@@ -46,31 +50,50 @@ func (d *RocksBlockDevice) offsetToKey(off int64) []byte {
 }
 
 func (d *RocksBlockDevice) ReadAt(p []byte, off int64) (n int, err error) {
-	if off%int64(d.BlockSize()) != 0 {
-		log.Panicln("Invalid offset", off, "length", len(p))
-	} else if uint32(len(p))%d.BlockSize() != 0 {
-		log.Panicln("Invalid read length", len(p))
-	}
-
 	for len(p) > 0 {
-		key := d.offsetToKey(off)
-		buf, _ := d.db.GetBytes(defaultReadOptions, key)
-		if buf != nil {
-			copy(p, buf)
-		} else {
-			for i, _ := range p[:int(d.BlockSize())] {
-				p[i] = 0
+		if off%blockSize != 0 {
+			blockOff := int(off % blockSize)
+			blockLen := len(p)
+			if (blockLen + blockOff) > blockSize {
+				blockLen = blockSize - blockOff
 			}
-		}
+			block := off - int64(blockOff)
 
-		off += int64(d.BlockSize())
-		n += int(d.BlockSize())
-		p = p[int(d.BlockSize()):]
+			key := d.offsetToKey(block)
+			buf, _ := d.db.GetBytes(defaultReadOptions, key)
+			if buf != nil {
+				copy(p, buf[blockOff:])
+			} else {
+				for i, _ := range p[:blockLen] {
+					p[i] = 0
+				}
+			}
+
+			off += int64(blockLen)
+			n += blockLen
+			p = p[blockLen:]
+		} else {
+			key := d.offsetToKey(off)
+			buf, _ := d.db.GetBytes(defaultReadOptions, key)
+			if buf != nil {
+				copy(p, buf)
+			} else {
+				for i, _ := range p[:int(d.BlockSize())] {
+					p[i] = 0
+				}
+			}
+
+			off += int64(d.BlockSize())
+			n += int(d.BlockSize())
+			p = p[int(d.BlockSize()):]
+		}
 	}
 	return n, nil
 }
 
 func (d *RocksBlockDevice) WriteAt(p []byte, off int64) (n int, err error) {
+	d.l.Limit(uint64(len(p)))
+
 	if off%int64(d.BlockSize()) != 0 {
 		log.Panicln("Invalid offset", off, "length", len(p))
 	} else if uint32(len(p))%d.BlockSize() != 0 {
@@ -106,6 +129,7 @@ func NewRocksBlockDevice(name string, size uint64) *RocksBlockDevice {
 	opts.SetCompression(gorocksdb.NoCompression)
 	opts.SetAllowMmapWrites(false)
 	opts.SetUseFsync(true)
+	opts.IncreaseParallelism(runtime.NumCPU())
 
 	filter := gorocksdb.NewBloomFilter(10)
 	bbto := gorocksdb.NewDefaultBlockBasedTableOptions()
@@ -116,13 +140,14 @@ func NewRocksBlockDevice(name string, size uint64) *RocksBlockDevice {
 	if err != nil {
 		log.Panicln(err)
 	}
-	return &RocksBlockDevice{db: db, size: size}
+	l := client.NewLimiter(50*1024*1024, time.Second, 0.1)
+	return &RocksBlockDevice{db: db, l: l, size: size}
 }
 
 func main() {
 	flag.Parse()
 
-	rocksDev := NewRocksBlockDevice("/pub/amistry/rocks.block", 1024*1024*1024*16)
+	rocksDev := NewRocksBlockDevice("/pub/amistry/rocks.block", diskSize)
 	nbd, err := client.NewServer(*dev, rocksDev)
 	if err != nil {
 		log.Panicln(err)
