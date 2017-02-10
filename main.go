@@ -17,7 +17,7 @@ type RocksBlockDevice struct {
 }
 
 const (
-	blockSize = 4096
+	blockSize = 512
 )
 
 var (
@@ -47,7 +47,7 @@ func (d *RocksBlockDevice) offsetToKey(off int64) []byte {
 
 func (d *RocksBlockDevice) ReadAt(p []byte, off int64) (n int, err error) {
 	if off%int64(d.BlockSize()) != 0 {
-		log.Panicln("Invalid offset", off)
+		log.Panicln("Invalid offset", off, "length", len(p))
 	} else if uint32(len(p))%d.BlockSize() != 0 {
 		log.Panicln("Invalid read length", len(p))
 	}
@@ -72,7 +72,7 @@ func (d *RocksBlockDevice) ReadAt(p []byte, off int64) (n int, err error) {
 
 func (d *RocksBlockDevice) WriteAt(p []byte, off int64) (n int, err error) {
 	if off%int64(d.BlockSize()) != 0 {
-		log.Panicln("Invalid offset", off)
+		log.Panicln("Invalid offset", off, "length", len(p))
 	} else if uint32(len(p))%d.BlockSize() != 0 {
 		log.Panicln("Invalid write length", len(p))
 	}
