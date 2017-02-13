@@ -51,42 +51,26 @@ func (d *RocksBlockDevice) offsetToKey(off int64) []byte {
 
 func (d *RocksBlockDevice) ReadAt(p []byte, off int64) (n int, err error) {
 	for len(p) > 0 {
-		if off%blockSize != 0 {
-			blockOff := int(off % blockSize)
-			blockLen := len(p)
-			if (blockLen + blockOff) > blockSize {
-				blockLen = blockSize - blockOff
-			}
-			block := off - int64(blockOff)
-
-			key := d.offsetToKey(block)
-			buf, _ := d.db.GetBytes(defaultReadOptions, key)
-			if buf != nil {
-				copy(p, buf[blockOff:])
-			} else {
-				for i, _ := range p[:blockLen] {
-					p[i] = 0
-				}
-			}
-
-			off += int64(blockLen)
-			n += blockLen
-			p = p[blockLen:]
-		} else {
-			key := d.offsetToKey(off)
-			buf, _ := d.db.GetBytes(defaultReadOptions, key)
-			if buf != nil {
-				copy(p, buf)
-			} else {
-				for i, _ := range p[:int(d.BlockSize())] {
-					p[i] = 0
-				}
-			}
-
-			off += int64(d.BlockSize())
-			n += int(d.BlockSize())
-			p = p[int(d.BlockSize()):]
+		blockOff := int(off % blockSize)
+		blockLen := len(p)
+		if (blockLen + blockOff) > blockSize {
+			blockLen = blockSize - blockOff
 		}
+		block := off - int64(blockOff)
+
+		key := d.offsetToKey(block)
+		buf, _ := d.db.GetBytes(defaultReadOptions, key)
+		if buf != nil {
+			copy(p, buf[blockOff:])
+		} else {
+			for i, _ := range p[:blockLen] {
+				p[i] = 0
+			}
+		}
+
+		off += int64(blockLen)
+		n += blockLen
+		p = p[blockLen:]
 	}
 	return n, nil
 }
@@ -128,12 +112,12 @@ func NewRocksBlockDevice(name string, size uint64) *RocksBlockDevice {
 	opts.SetCreateIfMissing(true)
 	opts.SetCompression(gorocksdb.NoCompression)
 	opts.SetAllowMmapWrites(false)
-	opts.SetUseFsync(true)
 	opts.IncreaseParallelism(runtime.NumCPU())
 
 	filter := gorocksdb.NewBloomFilter(10)
 	bbto := gorocksdb.NewDefaultBlockBasedTableOptions()
 	bbto.SetFilterPolicy(filter)
+	bbto.SetBlockSize(64 * 1024)
 	opts.SetBlockBasedTableFactory(bbto)
 
 	db, err := gorocksdb.OpenDb(opts, name)
