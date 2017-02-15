@@ -28,7 +28,7 @@ var (
 	defaultReadOptions  = gorocksdb.NewDefaultReadOptions()
 	defaultWriteOptions = gorocksdb.NewDefaultWriteOptions()
 
-	dev = flag.String("device", "/dev/nbd0", "Path to /deb/nbdX device.")
+	dev = flag.String("device", "/dev/nbd0", "Path to /dev/nbdX device.")
 )
 
 func (d *RocksBlockDevice) Readonly() bool {
@@ -107,6 +107,23 @@ func (d *RocksBlockDevice) Flush() error {
 	return d.db.Flush(gorocksdb.NewDefaultFlushOptions())
 }
 
+func (d *RocksBlockDevice) Trim(off uint64, length uint32) error {
+	for length > 0 {
+		blockOff := int(off % blockSize)
+		if blockOff == 0 && length >= blockSize {
+			key := d.offsetToKey(int64(off))
+			err := d.db.Delete(defaultWriteOptions, key)
+			if err != nil {
+				return err
+			}
+		}
+		blockLen := blockSize - blockOff
+		off += uint64(blockLen)
+		length -= uint32(blockLen)
+	}
+	return nil
+}
+
 func NewRocksBlockDevice(name string, size uint64) *RocksBlockDevice {
 	opts := gorocksdb.NewDefaultOptions()
 	opts.SetCreateIfMissing(true)
@@ -117,7 +134,9 @@ func NewRocksBlockDevice(name string, size uint64) *RocksBlockDevice {
 	filter := gorocksdb.NewBloomFilter(10)
 	bbto := gorocksdb.NewDefaultBlockBasedTableOptions()
 	bbto.SetFilterPolicy(filter)
-	bbto.SetBlockSize(64 * 1024)
+	bbto.SetBlockSize(128 * 1024)
+	cache := gorocksdb.NewLRUCache(64 * 1024 * 1024)
+	bbto.SetBlockCache(cache)
 	opts.SetBlockBasedTableFactory(bbto)
 
 	db, err := gorocksdb.OpenDb(opts, name)
