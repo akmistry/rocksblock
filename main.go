@@ -14,21 +14,27 @@ import (
 )
 
 type RocksBlockDevice struct {
-	db   *gorocksdb.DB
-	l    *client.Limiter
-	size uint64
+	db *gorocksdb.DB
+
+	iopsLimit *client.Limiter
+	bwLimit   *client.Limiter
+	size      uint64
 }
 
 const (
 	blockSize = 4096
 	diskSize  = 64 * 1024 * 1024 * 1024
+
+	megaByte = 1024 * 1024
 )
 
 var (
 	defaultReadOptions  = gorocksdb.NewDefaultReadOptions()
 	defaultWriteOptions = gorocksdb.NewDefaultWriteOptions()
 
-	dev = flag.String("device", "/dev/nbd0", "Path to /dev/nbdX device.")
+	dev           = flag.String("device", "/dev/nbd0", "Path to /dev/nbdX device.")
+	maxIops       = flag.Int("max-iops", 100, "Maximum IO/s")
+	maxThroughput = flag.Int("max-throughput", 10, "Maximum throughput, in MB/s")
 )
 
 func (d *RocksBlockDevice) Readonly() bool {
@@ -49,7 +55,19 @@ func (d *RocksBlockDevice) offsetToKey(off int64) []byte {
 	return buf
 }
 
+func (d *RocksBlockDevice) limit(size int) {
+	iopsDelay := d.iopsLimit.Add(1)
+	bwDelay := d.bwLimit.Add(uint64(size))
+	if bwDelay > iopsDelay {
+		time.Sleep(bwDelay)
+	} else {
+		time.Sleep(iopsDelay)
+	}
+}
+
 func (d *RocksBlockDevice) ReadAt(p []byte, off int64) (n int, err error) {
+	d.limit(len(p))
+
 	for len(p) > 0 {
 		blockOff := int(off % blockSize)
 		blockLen := len(p)
@@ -76,7 +94,7 @@ func (d *RocksBlockDevice) ReadAt(p []byte, off int64) (n int, err error) {
 }
 
 func (d *RocksBlockDevice) WriteAt(p []byte, off int64) (n int, err error) {
-	d.l.Limit(uint64(len(p)))
+	d.limit(len(p))
 
 	if off%int64(d.BlockSize()) != 0 {
 		log.Panicln("Invalid offset", off, "length", len(p))
@@ -143,8 +161,9 @@ func NewRocksBlockDevice(name string, size uint64) *RocksBlockDevice {
 	if err != nil {
 		log.Panicln(err)
 	}
-	l := client.NewLimiter(50*1024*1024, time.Second, 0.1)
-	return &RocksBlockDevice{db: db, l: l, size: size}
+	iops := client.NewLimiter(uint64(*maxIops), time.Second, 0.1)
+	bw := client.NewLimiter(uint64(*maxThroughput*megaByte), time.Second, 0.1)
+	return &RocksBlockDevice{db: db, iopsLimit: iops, bwLimit: bw, size: size}
 }
 
 func main() {
@@ -163,5 +182,9 @@ func main() {
 		nbd.Disconnect()
 	}()
 
-	log.Println(nbd.Run())
+	err = nbd.Run()
+	if err != nil {
+		log.Println("Shutdown error:", err)
+	}
+	rocksDev.db.Close()
 }
